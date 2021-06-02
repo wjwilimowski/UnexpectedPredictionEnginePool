@@ -1,6 +1,6 @@
 # Unexpected behavior in ML.NET PredictionEnginePool
 
-## Preface
+### Preface
 
 We're using a named prediction engine with the name `model1` in a `PredictionEnginePool`.
 
@@ -10,74 +10,42 @@ services
     .FromFile(modelName: "model1", filePath: "MLModel.zip", watchForChanges: false);
 ```
 
-The below usage works as expected because the `PredictionEnginePool` ensures the engine is lazy loaded before use.
+Example usage:
 
 ```c#
 private readonly PredictionEnginePool<ModelInput, ModelOutput> _pool;
 
-public SomeService(PredictionEnginePool<ModelInput, ModelOutput> pool)
-{
-    _pool = pool;
-}
-
-public ModelOutput Predict(ModelInput input)
+public void ThisWorks()
 {
     // This will initialize the "model1" prediction engine if it hasn't been used yet
-    //
     // See source code:
-    // https://github.com/dotnet/machinelearning/blob/58450d4f0709c237de95f31f8f05d46983c7a5c0/src/Microsoft.Extensions.ML/PredictionEnginePoolExtensions.cs#L39
     // https://github.com/dotnet/machinelearning/blob/58450d4f0709c237de95f31f8f05d46983c7a5c0/src/Microsoft.Extensions.ML/PredictionEnginePool.cs#L81
-    ModelOutput result = _pool.Predict("model1", input);
+    PredictionEngine<ModelInput, ModelOutput> engine = _pool.GetPredictionEngine("model1");
     
-    return result;
+    // We can now use the engine, then return it to the pool
 }
 ```
 
-## The problem
+In the above snippet, the `PredictionEnginePool.GetPredictionEngine(string modelName)` method ensures the engine is loaded before use.
 
-For whatever reason, one might want to get access to the raw `ITransformer` powering the `PredictionEngine`, which seems reasonable given that `PredictionEnginePool` has a public method for that. However, there is a catch.
+https://github.com/dotnet/machinelearning/blob/58450d4f0709c237de95f31f8f05d46983c7a5c0/src/Microsoft.Extensions.ML/PredictionEnginePool.cs#L101-L105
+
+### The issue
+
+If `_pool.GetPredictionEngine("model1")` has never been called before calling `_pool.GetModel("model1")`, the `model1` prediction engine is not loaded and `KeyNotFoundException` will be thrown.
 
 ```c#
 private readonly PredictionEnginePool<ModelInput, ModelOutput> _pool;
-private readonly MLContext _context;
 
-public SomeService(PredictionEnginePool<ModelInput, ModelOutput> pool, MLContext context)
+public void ThisDoesNotWork()
 {
-    _pool = pool;
-    _context = context;
-}
-
-public ITransformer GetModelTransformer()
-{
-    // This method does NOT initialize the named engine if it hasn't been initialized yet.
-    // It will throw KeyNotFoundException if called before something has initialized "model1",
-    // but work just fine after something else has already initialized it.
-    //
+    // Throws KeyNotFoundException unless _pool.GetPredictionEngine("model1") has been called before
     // See source code:
-    // https://github.com/dotnet/machinelearning/blob/58450d4f0709c237de95f31f8f05d46983c7a5c0/src/Microsoft.Extensions.ML/PredictionEnginePool.cs#L53
+    // https://github.com/dotnet/machinelearning/blob/58450d4f0709c237de95f31f8f05d46983c7a5c0/src/Microsoft.Extensions.ML/PredictionEnginePool.cs#L51
     ITransformer model = _pool.GetModel("model1");
-    
-    return model;
 }
 ```
 
-This issue can prove confusing, because a consumer of the library would reasonably expect a public method of `PredictionEnginePool` to take care of initializing everything under the hood. 
+This inconsistent behavior can easily catch someone off-guard - one expects every public method on `PredictionEnginePool` to have the same "ensure initialized" behavior.
 
-Getting the named engine from the pool and returning it immediately on app startup can be used as a workaround.
-
-```c#
-// Call once
-public void InitializeModel()
-{
-    var predictionEngine = _pool.GetPredictionEngine("model1");
-    _pool.ReturnPredictionEngine("model1", predictionEngine);
-}
-
-// If InitializeModel() was called first, this works
-public ITransformer GetModelTransformer()
-{
-    ITransformer model = _pool.GetModel("model1");
-    
-    return model;
-}
-```
+https://github.com/dotnet/machinelearning/blob/58450d4f0709c237de95f31f8f05d46983c7a5c0/src/Microsoft.Extensions.ML/PredictionEnginePool.cs#L51-L54
